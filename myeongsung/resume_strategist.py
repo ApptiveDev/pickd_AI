@@ -3,7 +3,7 @@ import json
 import time
 import random
 from dotenv import load_dotenv
-from typing import List, Dict, Any, TypedDict, Literal, Optional
+from typing import List, Dict, Any, TypedDict, Literal, Optional, Union
 
 # .env 환경변수를 자동으로 불러옵니다.
 load_dotenv()
@@ -34,9 +34,10 @@ class AgentState(TypedDict):
     jd_url: Optional[str]
     experiences: List[Dict[str, Any]]
     prompts: List[str]
+    user_persona: str                  # 지원자 성향/가치관 (동적 S/W 프레이밍용)
     jd_context: Dict[str, Any]
     placements: List[Dict[str, Any]]
-    remaining_indices: List[int]
+    remaining_indices: List[int]       # 하위 호환 유지 (신규 로직에서는 미사용)
     errors: List[str]
 
 # ==========================================
@@ -183,23 +184,34 @@ def jd_structural_analyzer(state: AgentState) -> AgentState:
 
 def swot_strategy_scorer(state: AgentState) -> AgentState:
     llm = ChatOpenAI(model="gpt-4o", temperature=0)
-    
+    user_persona = state.get("user_persona", "") or "별도 성향 정보 없음"
+
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "JD의 O, T와 각 경험의 S(강점), W(약점)를 대조하여 4대 전략 점수를 매기세요.\n"
-                   "SO: 강점으로 기회 선점 / ST: 강점으로 위협 돌파 / WO: 약점을 기회로 상쇄 / WT: 약점을 인정하고 보완.\n"
-                   "가장 점수가 높은 '극단적 전략'을 해당 경험의 대표 전략으로 정의하세요."),
-        ("user", "JD Context:\nOpportunities: {opportunities}\nThreats: {threats}\n\nExperiences:\n{experiences}")
+        ("system",
+         "JD의 O, T와 각 경험의 S(강점), W(약점)를 대조하여 4대 전략 점수를 매기세요.\n"
+         "SO: 강점으로 기회 선점 / ST: 강점으로 위협 돌파 / WO: 약점을 기회로 상쇄 / WT: 약점을 인정하고 보완.\n"
+         "가장 점수가 높은 '극단적 전략'을 해당 경험의 대표 전략으로 정의하세요.\n\n"
+         "[동적 S/W 프레이밍 규칙]\n"
+         "아래 User Persona를 S/W 분류의 해석 필터로 사용하세요.\n"
+         "단, Persona와 경험 팩트(content)가 충돌하면 반드시 팩트를 우선합니다.\n"
+         "예: Persona가 '끈기'이지만 경험에 중도 포기가 명시된 경우 → W로 분류, WT 점수를 높이세요.\n\n"
+         "한국어 구사: 모든 텍스트 출력(reasoning 등)을 반드시 한국어로 작성하세요."),
+        ("user",
+         "User Persona: {user_persona}\n"
+         "JD Context:\nOpportunities: {opportunities}\nThreats: {threats}\n\n"
+         "Experiences:\n{experiences}")
     ])
-    
+
     chain = (prompt | llm.with_structured_output(ExperienceScoringList)).with_retry(stop_after_attempt=3)
     try:
         experiences_json = json.dumps(state["experiences"], ensure_ascii=False)
         result = chain.invoke({
+            "user_persona": user_persona,
             "opportunities": state.get("jd_context", {}).get("opportunities", ""),
             "threats": state.get("jd_context", {}).get("threats", ""),
             "experiences": experiences_json
         })
-        
+
         score_map = {item.id: item for item in result.scored_experiences}
         for exp in state["experiences"]:
             score_data = score_map.get(exp["id"])
@@ -207,10 +219,10 @@ def swot_strategy_scorer(state: AgentState) -> AgentState:
                 exp["scores"] = score_data.scores.model_dump()
                 exp["primary_strategy"] = score_data.primary_strategy
                 exp["strategy_reasoning"] = score_data.reasoning
-                
+
     except Exception as e:
         state["errors"].append(f"[SWOT Scoring API Error] {str(e)}")
-        
+
     return state
 
 
@@ -293,98 +305,150 @@ def _score_based_fallback(
 
 
 def sequential_strategic_placer(state: AgentState) -> AgentState:
+    """자소서 문항별 최적 경험을 전략적으로 배치합니다.
+
+    주요 변경사항:
+    - 1:N 매핑 허용: 동일 경험을 여러 문항에 재사용 가능
+    - user_persona 기반 동적 S/W 해석
+    - 팩트-페르소나 충돌 시 팩트 우선 (환각 방지)
+    - 3단 reasoning: [JD 타겟팅] / [동적 프레이밍] / [전략 도출]
+    - 적합 경험 없을 때 N/A 반환 (억지 매핑 금지)
+    """
     llm = ChatOpenAI(model="gpt-4o", temperature=0.2)
     experiences = state["experiences"]
     prompts = state["prompts"]
-    
-    remaining_indices = state.get("remaining_indices", [])
-    if not remaining_indices:
-        remaining_indices = list(range(len(experiences)))
-        
+    user_persona = state.get("user_persona", "") or "별도 성향 정보 없음"
+    jd_context = state.get("jd_context", {})
     placements = []
-    priority_weight = {"상": 2, "중": 1, "하": 0}
-    
-    # [Fix] 가이드라인과 매칭 논리를 엄격히 통제할 구조화된 출력 모델 설계
-    class GuideOutput(BaseModel):
-        reasoning: str = Field(description="전략 선정 이유. 반드시 '분석 결과 [선택한 전략명] 전략이 가장 적합합니다'라는 문장으로 시작할 것")
-        writing_guide: str = Field(description="실제 자소서 작성 가이드라인 및 핵심 키워드 정리")
-    
+
+    # ── 구조화 출력 모델 ──────────────────────────────────────────
+    class StrategicPlacement(BaseModel):
+        experience_id: Optional[Union[str, int]] = Field(
+            None,
+            description="매핑된 경험 ID. 경험 목록 중 하나의 id 값 (문자열 혹은 숫자 가능). 적합한 경험이 없으면 null."
+        )
+        selected_strategy: Literal["SO", "ST", "WO", "WT", "N/A"] = Field(
+            ...,
+            description="SWOT 전략. 적합한 경험이 없으면 N/A."
+        )
+        jd_targeting: str = Field(
+            description="[JD 타겟팅] JD의 어떤 구체적 요구사항을 Opportunity(O) 또는 Threat(T)으로 설정했는지 명시."
+        )
+        dynamic_framing: str = Field(
+            description="[동적 프레이밍] user_persona 기준으로 해당 경험이 왜 강점(S) 또는 약점(W)으로 해석되는지 명시. "
+                        "페르소나와 팩트가 충돌하면 팩트를 우선하고 그 이유를 설명하세요."
+        )
+        strategy_derivation: str = Field(
+            description="[전략 도출] 선택한 SWOT 전략이 이 문항과 JD 환경에서 왜 최선의 선택인지 전략적 가치를 논증."
+        )
+        writing_guide: str = Field(
+            description="실제 자소서 작성 가이드라인: 경험 내용과 전략을 연결하여 강조할 키워드·서술 흐름 정리."
+        )
+
+    # ── 시스템 프롬프트 ───────────────────────────────────────────
+    SYSTEM_PROMPT = (
+        "당신은 개발자 채용을 위한 최고 수준의 이력서/자소서 전략 분석 에이전트입니다.\n"
+        "JD 분석, 지원자 경험, 지원자 성향을 종합하여 각 자소서 문항에 가장 강력한 전략적 매핑을 제공하세요.\n\n"
+        "# 핵심 지침\n"
+        "1. [유연한 매핑 - 1:N 허용]\n"
+        "   - 하나의 경험 ID를 여러 문항에 중복 사용할 수 있습니다.\n"
+        "   - 경험 데이터(content, tags)에 없는 사실(팀워크, 갈등 조율 등)을 절대 지어내지 마세요.\n"
+        "   - 어떤 경험도 이 문항에 적합하지 않다면 experience_id=null, selected_strategy=N/A를 반환하세요.\n\n"
+        "2. [동적 S/W 프레이밍 - User Persona 기반]\n"
+        "   - 경험을 S/W로 분류할 때 user_persona를 해석 필터로 사용하세요.\n"
+        "   - 단, Persona와 경험 팩트(content)가 충돌하면 반드시 팩트를 우선하세요.\n"
+        "   - 예: Persona='끈기'지만 content에 '중도 포기'가 명시 → W 분류, WT 전략 선택.\n\n"
+        "3. [SWOT 전략 정의]\n"
+        "   - SO: 강점(S) + Persona → JD 핵심 요구사항(O) 완벽 충족\n"
+        "   - ST: 강점(S) + Persona → JD 실무 허들/위협(T) 돌파\n"
+        "   - WO: 약점(W) 인정 + JD 환경(O)에서의 성장 어필\n"
+        "   - WT: 약점(W)과 위협(T) 직시, 현실적 보완책 제시\n\n"
+        "4. [reasoning 3단 논리 구조]\n"
+        "   - jd_targeting: JD의 어떤 구체적 요구사항을 O/T로 설정했는가\n"
+        "   - dynamic_framing: Persona 기준으로 이 경험이 왜 S/W인가 (팩트 충돌 시 팩트 우선)\n"
+        "   - strategy_derivation: 선택한 전략이 왜 이 문항과 JD 환경에서 최선인가\n\n"
+        "# 한국어 출력 규칙 (가장 중요)\n"
+        "모든 텍스트 출력을 반드시 한국어로 작성하세요. "
+        "영어 사용을 엄격히 금지합니다."
+    )
+
+    # 경험 목록을 요약 (점수 포함해서 LLM이 참고하도록)
+    experiences_summary = json.dumps(
+        [
+            {
+                "id": e["id"],
+                "title": e["title"],
+                "content": e["content"],
+                "tags": e.get("tags", []),
+                "priority": e.get("priority", ""),
+                "swot_scores": e.get("scores", {}),
+                "primary_strategy": e.get("primary_strategy", ""),
+            }
+            for e in experiences
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    placement_prompt = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM_PROMPT),
+        ("user",
+         "## 자소서 문항\n{prompt_text}\n\n"
+         "## JD 분석 결과\nOpportunities: {opportunities}\nThreats: {threats}\n\n"
+         "## User Persona\n{user_persona}\n\n"
+         "## 사용 가능한 경험 목록 (1:N 재사용 가능)\n{experiences}")
+    ])
+    chain = (
+        placement_prompt | llm.with_structured_output(StrategicPlacement)
+    ).with_retry(stop_after_attempt=3)
+
     for prompt_text in prompts:
-        if not remaining_indices:
-            placements.append({
-                "question": prompt_text,
-                "experience_title": "경험 부족",
-                "selected_strategy": "N/A",
-                "reasoning": "할당 가능한 여유 경험이 부족합니다.",
-                "writing_guide": "N/A"
+        print(f"[*] 문항 분석 중: '{prompt_text[:40]}...'")
+        try:
+            result: StrategicPlacement = chain.invoke({
+                "prompt_text": prompt_text,
+                "opportunities": jd_context.get("opportunities", ""),
+                "threats": jd_context.get("threats", ""),
+                "user_persona": user_persona,
+                "experiences": experiences_summary,
             })
-            continue
 
-        # [개선] 6가지 문항 유형 기반 의도 감지 (SO 기본값 편향 제거)
-        target_strategy, fallback_used = _detect_intent_strategy(prompt_text, llm)
-        if fallback_used or target_strategy is None:
-            # LLM 감지 실패 시 경험 점수 합계 기반 폴백 (SO 하드코딩 제거)
-            target_strategy = _score_based_fallback(experiences, remaining_indices, priority_weight)
-            print(f"[*] 의도 감지 폴백 사용 → 점수 기반 전략: {target_strategy} (문항: '{prompt_text[:30]}...')") 
-        else:
-            print(f"[*] 의도 감지 성공 → 전략: {target_strategy} (문항: '{prompt_text[:30]}...')")
-            
-        best_exp_idx = -1
-        max_score = -1
-        best_priority_val = -1
-        
-        for idx in remaining_indices:
-            exp = experiences[idx]
-            score = exp.get("scores", {}).get(target_strategy, 0)
-            p_val = priority_weight.get(exp.get("priority", "하"), 0)
-            
-            if max_score != -1 and abs(max_score - score) < 5:
-                if p_val > best_priority_val:
-                    max_score = score
-                    best_exp_idx = idx
-                    best_priority_val = p_val
-            elif score > max_score:
-                max_score = score
-                best_exp_idx = idx
-                best_priority_val = p_val
-
-        if best_exp_idx != -1:
-            best_exp = experiences[best_exp_idx]
-            remaining_indices.remove(best_exp_idx)
-            
-            # [Fix] Self-Correction을 유도하는 프롬프트 적용
-            guide_prompt = ChatPromptTemplate.from_messages([
-                ("system", "자소서 작성 가이드라인과 매칭 논리를 작성해주세요.\n"
-                           "1. reasoning 필드는 서두에 반드시 '분석 결과 [{target_strategy}] 전략이 가장 적합합니다'라는 문장을 강제로 포함하여 AI 스스로 자신의 논리적 일관성을 확인(Self-Correction)하세요. 결론 내린 전략 명칭은 반드시 {target_strategy} 와 100% 일치해야 합니다.\n"
-                           "2. writing_guide 필드는 경험의 내용과 매칭 논리를 연결하여, 서술 시 강조해야 할 핵심 키워드 및 흐름을 분석하세요."),
-                ("user", "문항: {prompt_text}\n전략: {target_strategy}\n경험 명: {exp_title}\n경험 내용: {exp_content}\n경험의 원래 평가이유: {reasoning}")
-            ])
-            try:
-                guide_chain = (guide_prompt | llm.with_structured_output(GuideOutput)).with_retry(stop_after_attempt=3)
-                guide_result = guide_chain.invoke({
-                    "prompt_text": prompt_text,
-                    "target_strategy": target_strategy,
-                    "exp_title": best_exp["title"],
-                    "exp_content": best_exp["content"],
-                    "reasoning": best_exp.get("strategy_reasoning", "")
-                })
-                final_reasoning = guide_result.reasoning
-                final_guide = guide_result.writing_guide
-            except Exception:
-                final_reasoning = f"분석 결과 [{target_strategy}] 전략이 가장 적합합니다. (세부 매칭 논리 생성 실패)"
-                final_guide = "가이드 생성 실패"
+            # experience_id → experience_title 조회 (타입 불일치 방지를 위해 str()로 변환 후 비교)
+            exp_title = "N/A"
+            if result.experience_id is not None:
+                matched = next(
+                    (e for e in experiences if str(e["id"]) == str(result.experience_id)), None
+                )
+                exp_title = matched["title"] if matched else f"Unknown (id={result.experience_id})"
+                print(f"    → 전략: {result.selected_strategy} | 경험: '{exp_title}'")
+            else:
+                print(f"    → 전략: N/A | 적합한 경험 없음")
 
             placements.append({
-                "question": prompt_text,
-                "experience_id": best_exp["id"],
-                "experience_title": best_exp["title"],
-                "selected_strategy": target_strategy,
-                "reasoning": final_reasoning,
-                "writing_guide": final_guide
+                "essay_question":           prompt_text,
+                "matched_experience_id":    result.experience_id,
+                "matched_experience_title": exp_title,
+                "strategy":                 result.selected_strategy,
+                "jd_targeting":             result.jd_targeting,
+                "dynamic_framing":          result.dynamic_framing,
+                "strategy_derivation":      result.strategy_derivation,
+                "writing_guide":            result.writing_guide,
             })
-            
+
+        except Exception as e:
+            state["errors"].append(f"[Strategic Placement Error] {str(e)}")
+            placements.append({
+                "essay_question":           prompt_text,
+                "matched_experience_id":    None,
+                "matched_experience_title": "오류",
+                "strategy":                 "N/A",
+                "jd_targeting":             f"배치 처리 중 오류 발생: {str(e)}",
+                "dynamic_framing":          "",
+                "strategy_derivation":      "",
+                "writing_guide":            "N/A",
+            })
+
     state["placements"] = placements
-    state["remaining_indices"] = remaining_indices
     return state
 
 
