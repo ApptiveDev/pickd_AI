@@ -214,6 +214,84 @@ def swot_strategy_scorer(state: AgentState) -> AgentState:
     return state
 
 
+# ==========================================
+# [개선] 문항 의도 기반 전략 감지 헬퍼 함수
+# - SO 기본값 편향 제거
+# - 6가지 문항 유형 커버
+# ==========================================
+_STRATEGY_CHOICES = ["SO", "ST", "WO", "WT"]
+
+def _detect_intent_strategy(prompt_text: str, llm) -> tuple[str | None, bool]:
+    """자소서 문항 의도를 분석하여 최적 SWOT 전략을 반환합니다.
+    
+    Returns:
+        (target_strategy, fallback_used)
+        - target_strategy: 'SO' | 'ST' | 'WO' | 'WT' | None (None이면 폴백 필요)
+        - fallback_used: LLM 감지 실패 여부
+    """
+    intent_prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "당신은 자소서 문항 의도 분석 전문가입니다.\n"
+         "아래 [문항 유형별 전략 매핑]을 기준으로 주어진 자소서 문항을 분석하여 "
+         "가장 적합한 SWOT 전략 하나를 선택하세요.\n\n"
+         "[문항 유형별 전략 매핑]\n"
+         "• 성과/도전/목표달성/리더십 문항 → SO\n"
+         "  예: '목표를 세우고 달성한 경험', '도전적인 사례', '리더로서의 경험', '성과를 낸 경험'\n\n"
+         "• 위기대응/경쟁상황/압박/기술적 난관 문항 → ST\n"
+         "  예: '어려운 상황에서 문제를 해결한 경험', '갈등·충돌을 해결한 경험', '실패 위기를 극복한 사례'\n\n"
+         "• 약점보완/성장/개선/협업·팀워크 문항 → WO\n"
+         "  예: '부족한 점을 보완한 경험', '피드백을 받아 성장한 경험', '팀원과 협력하여 성과를 낸 경험'\n\n"
+         "• 실패/한계 인정/반성/포기 경험 문항 → WT\n"
+         "  예: '가장 힘들었던 경험', '실패한 경험과 교훈', '포기했거나 한계를 직면한 경험'\n\n"
+         "• 가치관/신념/직업의식/인생관 문항 → SO\n"
+         "  예: '직업 가치관', '인생 좌우명', '가장 중요하게 여기는 것'\n\n"
+         "• 지원동기/직무이해/입사 후 포부 문항 → ST\n"
+         "  예: '지원 동기', '이 직무를 선택한 이유', '입사 후 목표 및 성장 계획'\n\n"
+         "중요: 반드시 SO, ST, WO, WT 중 정확히 하나만 출력하세요. "
+         "다른 텍스트, 설명, 구두점은 절대 포함하지 마세요."),
+        ("user", "자소서 문항: {prompt_text}")
+    ])
+
+    try:
+        raw = (intent_prompt | llm).with_retry(stop_after_attempt=3).invoke(
+            {"prompt_text": prompt_text}
+        ).content.strip().upper()
+        # 불필요한 구두점·공백 제거 후 유효성 검사
+        cleaned = raw.replace(".", "").replace(",", "").replace("'", "").replace('"', "").strip()
+        if cleaned in _STRATEGY_CHOICES:
+            return cleaned, False
+        # LLM이 유효하지 않은 문자열 반환 → 폴백 필요
+        return None, True
+    except Exception:
+        return None, True
+
+
+def _score_based_fallback(
+    experiences: list,
+    remaining_indices: list,
+    priority_weight: dict,
+) -> str:
+    """LLM 의도 감지 실패 시 경험 점수 합계 기반으로 최적 전략을 선택합니다.
+    
+    각 후보 경험의 우선순위를 반영한 전략별 점수 총합을 계산,
+    가장 높은 전략을 반환합니다. 점수가 모두 0이면 무작위 선택.
+    """
+    strategy_totals: dict[str, float] = {s: 0.0 for s in _STRATEGY_CHOICES}
+
+    for idx in remaining_indices:
+        exp = experiences[idx]
+        scores = exp.get("scores", {})
+        # 우선순위 가중치: 상=3, 중=2, 하=1 (0이면 최소 1 보장)
+        p_val = priority_weight.get(exp.get("priority", "하"), 0) + 1
+        for strategy in _STRATEGY_CHOICES:
+            strategy_totals[strategy] += scores.get(strategy, 0) * p_val
+
+    if all(v == 0.0 for v in strategy_totals.values()):
+        return random.choice(_STRATEGY_CHOICES)
+
+    return max(strategy_totals, key=lambda s: strategy_totals[s])
+
+
 def sequential_strategic_placer(state: AgentState) -> AgentState:
     llm = ChatOpenAI(model="gpt-4o", temperature=0.2)
     experiences = state["experiences"]
@@ -242,20 +320,14 @@ def sequential_strategic_placer(state: AgentState) -> AgentState:
             })
             continue
 
-        # [Fix] 문항의 의도를 최우선으로 고려하는 제약 조건 추가
-        intent_prompt = ChatPromptTemplate.from_messages([
-            ("system", "다음 자소서 문항의 직무 연관성과 '질문 의도'를 최우선으로 분석하여 가장 적절한 전략 방향(SO, ST, WO, WT 중 택1) 하나만 답변하세요.\n"
-                       "제약 조건: 약점/극복 문항 -> WO 또는 WT (성장 가능성 어필) / 성과/도전/문제해결 문항 -> SO 또는 ST (해결사 능력 어필).\n"
-                       "결과는 반드시 'SO', 'ST', 'WO', 'WT' 중 하나의 문자열로만 출력하세요. 기본값은 'SO'입니다."),
-            ("user", "자소서 문항: {prompt_text}")
-        ])
-        
-        try:
-            target_strategy = (intent_prompt | llm).with_retry(stop_after_attempt=3).invoke({"prompt_text": prompt_text}).content.strip()
-            if target_strategy not in ["SO", "ST", "WO", "WT"]:
-                target_strategy = "SO" 
-        except Exception:
-            target_strategy = "SO"
+        # [개선] 6가지 문항 유형 기반 의도 감지 (SO 기본값 편향 제거)
+        target_strategy, fallback_used = _detect_intent_strategy(prompt_text, llm)
+        if fallback_used or target_strategy is None:
+            # LLM 감지 실패 시 경험 점수 합계 기반 폴백 (SO 하드코딩 제거)
+            target_strategy = _score_based_fallback(experiences, remaining_indices, priority_weight)
+            print(f"[*] 의도 감지 폴백 사용 → 점수 기반 전략: {target_strategy} (문항: '{prompt_text[:30]}...')") 
+        else:
+            print(f"[*] 의도 감지 성공 → 전략: {target_strategy} (문항: '{prompt_text[:30]}...')")
             
         best_exp_idx = -1
         max_score = -1
