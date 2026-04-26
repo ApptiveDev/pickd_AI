@@ -40,7 +40,7 @@ class JobPostingBase(BaseModel):
     work_location: Optional[str] = Field(None, description="근무지")
     preferred_qualifications: Optional[str] = Field(None, description="우대사항")
     extra_points: Optional[str] = Field(None, description="가산점")
-    evaluation_criteria: Optional[Any] = Field(None, description="전형 배점 (JSON/구조화 데이터)")
+    evaluation_criteria: Optional[str] = Field(None, description="전형 배점 (텍스트 또는 JSON 형태의 문자열)")
     salary: Optional[str] = Field(None, description="연봉")
 
 class JobPostingCreate(JobPostingBase):
