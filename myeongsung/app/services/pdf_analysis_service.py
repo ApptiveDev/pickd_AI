@@ -19,7 +19,8 @@ def analyze_job_pdf(file_content: bytes) -> JobPostingCreate:
     try:
         url = "https://api.upstage.ai/v1/document-ai/layout-analysis"
         headers = {"Authorization": f"Bearer {api_key}"}
-        files = {"document": file_content}
+        # 한글 파일명 등으로 인한 latin-1 인코딩 에러 방지를 위해 파일명을 'document.pdf'로 고정
+        files = {"document": ("document.pdf", file_content, "application/pdf")}
         
         response = requests.post(url, headers=headers, files=files)
         response.raise_for_status()
