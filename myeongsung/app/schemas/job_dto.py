@@ -51,3 +51,7 @@ class JobPostingResponse(JobPostingBase):
 
     class Config:
         from_attributes = True
+
+class UrlAnalysisRequest(BaseModel):
+    url: str = Field(..., description="분석할 채용 공고 URL")
+

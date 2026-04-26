@@ -7,9 +7,24 @@ from typing import Optional
 from app.schemas.resume_dto import ExperienceInput, PlacementResponse
 from app.services.resume_service import create_workflow
 
+from app.schemas.job_dto import UrlAnalysisRequest, JobPostingCreate
+from app.services.job_analysis_service import analyze_job_url
+
 router = APIRouter()
 
 workflow = create_workflow()
+
+@router.post("/analyze/url", response_model=JobPostingCreate)
+async def analyze_url(request: UrlAnalysisRequest):
+    """
+    URL을 입력받아 Firecrawl로 마크다운을 추출하고,
+    LLM을 통해 11개 필드로 구성된 구조화된 데이터를 반환합니다.
+    """
+    try:
+        result = analyze_job_url(request.url)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/analyze-and-place", response_model=PlacementResponse)
 async def analyze_and_place(
