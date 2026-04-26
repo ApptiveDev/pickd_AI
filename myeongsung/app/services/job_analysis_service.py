@@ -55,7 +55,11 @@ def analyze_job_url(url: str) -> JobPostingCreate:
     chain = prompt | llm.with_structured_output(JobPostingCreate)
     
     try:
-        result = chain.invoke({"markdown": markdown_content})
+        # LangSmith에 'firecrawl'이라는 이름으로 추적되도록 config 추가
+        result = chain.invoke(
+            {"markdown": markdown_content},
+            config={"run_name": "firecrawl"}
+        )
         return result
     except Exception as e:
         raise ValueError(f"LLM 데이터 추출 중 오류가 발생했습니다: {str(e)}")
