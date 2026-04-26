@@ -1,8 +1,9 @@
 import os
-from firecrawl import FirecrawlApp
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from app.schemas.job_dto import JobPostingCreate
+
+import requests
 
 def analyze_job_url(url: str) -> JobPostingCreate:
     """
@@ -10,12 +11,31 @@ def analyze_job_url(url: str) -> JobPostingCreate:
     LLM을 통해 구조화된 채용 공고 데이터(JobPostingCreate)로 변환합니다.
     """
     # 1. Firecrawl로 URL 스크래핑
-    # .env 파일에 FIRECRAWL_API_KEY 가 설정되어 있어야 합니다.
-    firecrawl_app = FirecrawlApp(api_key=os.getenv("FIRECRAWL_API_KEY"))
-    
+    firecrawl_api_key = os.getenv("FIRECRAWL_API_KEY")
+    if not firecrawl_api_key:
+        raise ValueError("FIRECRAWL_API_KEY 환경변수가 설정되지 않았습니다.")
+        
     try:
-        scrape_result = firecrawl_app.scrape_url(url, params={'formats': ['markdown']})
-        markdown_content = scrape_result.get('markdown', '')
+        response = requests.post(
+            'https://api.firecrawl.dev/v2/scrape',
+            headers={
+                'Authorization': f'Bearer {firecrawl_api_key}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'url': url,
+                'formats': ['markdown']
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        scrape_result = response.json()
+        
+        # v2 API 응답 형식: {"success": true, "data": {"markdown": "..."}}
+        if not scrape_result.get("success"):
+            raise ValueError(f"Firecrawl API 실패: {scrape_result.get('error', '알 수 없는 오류')}")
+            
+        markdown_content = scrape_result.get("data", {}).get("markdown", "")
     except Exception as e:
         raise ValueError(f"Firecrawl API 호출 중 오류가 발생했습니다: {str(e)}")
     
