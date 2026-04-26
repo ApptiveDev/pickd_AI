@@ -33,3 +33,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# SQLite
+*.db
+*.sqlite3
