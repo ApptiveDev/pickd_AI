@@ -44,7 +44,7 @@ def analyze_job_url(url: str) -> JobPostingCreate:
 
     # 2. OpenAI 기반 구조화 데이터 추출
     # .env 파일에 OPENAI_API_KEY 가 설정되어 있어야 합니다.
-    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", "당신은 채용 공고 분석 전문가입니다. 주어진 채용 공고의 마크다운 텍스트를 면밀히 분석하여, 지정된 스키마에 맞게 필수 정보와 우대/개인화 정보를 추출하세요. 해당하는 정보가 명확하지 않다면 null 또는 기본값을 사용하세요."),
