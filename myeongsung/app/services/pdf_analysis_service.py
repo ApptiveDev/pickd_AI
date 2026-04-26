@@ -27,46 +27,48 @@ def analyze_job_pdf(file_content: bytes) -> JobPostingCreate:
     except Exception as e:
         raise ValueError(f"Upstage API 호출 중 오류가 발생했습니다: {str(e)}")
 
-    # 3. 추출된 텍스트 및 표 정보 정리 (Markdown 형식으로 추출된 텍스트 활용)
-    # Upstage 응답에서 'elements'를 순회하며 텍스트와 표 정보를 수집합니다.
+    # 3. 추출된 텍스트 및 표 정보 정리 (페이지 정보 포함)
     extracted_content = []
     
     for element in result.get("elements", []):
+        page_num = element.get("page")
         category = element.get("category")
         content = element.get("content", {}).get("text", "")
         
+        # 페이지 번호 표시 추가 (LLM이 출처를 식별할 수 있도록)
+        prefix = f"[Page {page_num}] " if page_num else ""
+        
         if category == "table":
-            # 표의 경우 html 형식이 있다면 활용하고 없으면 텍스트 활용
             html = element.get("content", {}).get("html", "")
             if html:
-                extracted_content.append(f"\n[Table]\n{html}\n")
+                extracted_content.append(f"\n{prefix}[Table]\n{html}\n")
             else:
-                extracted_content.append(f"\n[Table Text]\n{content}\n")
+                extracted_content.append(f"\n{prefix}[Table Text]\n{content}\n")
         else:
-            extracted_content.append(content)
+            extracted_content.append(f"{prefix}{content}")
 
     full_content = "\n".join(extracted_content)
 
     if not full_content.strip():
         raise ValueError("PDF에서 유의미한 텍스트를 추출하지 못했습니다.")
 
-
     # 4. OpenAI 기반 구조화 데이터 추출
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "당신은 채용 공고 분석 전문가입니다. 주어진 PDF 파싱 텍스트와 표 정보를 면밀히 분석하여, 지정된 스키마에 맞게 필수 정보와 우대/개인화 정보를 추출하세요. 해당하는 정보가 명확하지 않다면 null 또는 기본값을 사용하세요."),
-        ("user", "다음 PDF 분석 내용을 바탕으로 채용 정보를 추출해주세요:\n\n{content}")
+        ("system", "당신은 채용 공고 분석 전문가입니다. 주어진 PDF 파싱 내용(페이지 번호 포함)을 면밀히 분석하여, 지정된 스키마에 맞게 정보를 추출하세요. 특히 'citations' 필드에는 각 주요 정보의 근거가 된 페이지 번호와 원문 텍스트 일부를 반드시 포함하여 NotebookLM과 같은 출처 기능을 제공해야 합니다."),
+        ("user", "다음 PDF 분석 내용을 바탕으로 채용 정보와 출처(Citations)를 추출해주세요:\n\n{content}")
     ])
     
     chain = prompt | llm.with_structured_output(JobPostingCreate)
     
     try:
-        # LangSmith에 'pdf_parsing'이라는 이름으로 추적되도록 config 추가
+        # LangSmith에 'pdf_parsing_with_citations'라는 이름으로 추적되도록 config 추가
         structured_result = chain.invoke(
             {"content": full_content},
-            config={"run_name": "pdf_parsing"}
+            config={"run_name": "pdf_parsing_with_citations"}
         )
         return structured_result
     except Exception as e:
         raise ValueError(f"LLM 데이터 추출 중 오류가 발생했습니다: {str(e)}")
+

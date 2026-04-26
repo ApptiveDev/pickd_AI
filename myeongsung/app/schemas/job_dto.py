@@ -26,7 +26,12 @@ class UserResponse(UserBase):
     class Config:
         from_attributes = True
 
-# ── 공고 분석 데이터 DTO (11개 필드) ─────────────────────────
+class Citation(BaseModel):
+    field: str = Field(..., description="근거가 되는 필드명")
+    page: int = Field(..., description="근거가 발견된 PDF 페이지 번호")
+    content: str = Field(..., description="근거가 된 원문 텍스트 일부")
+
+# ── 공고 분석 데이터 DTO (11개 필드 + 출처) ──────────────────
 class JobPostingBase(BaseModel):
     # 필수 정보 (6종)
     company_name: str = Field(..., description="기업명")
@@ -42,6 +47,10 @@ class JobPostingBase(BaseModel):
     extra_points: Optional[str] = Field(None, description="가산점")
     evaluation_criteria: Optional[str] = Field(None, description="전형 배점 (텍스트 또는 JSON 형태의 문자열)")
     salary: Optional[str] = Field(None, description="연봉")
+
+    # 출처 정보 (NotebookLM 스타일)
+    citations: List[Citation] = Field(default_factory=list, description="데이터 추출 근거 및 출처 정보")
+
 
 class JobPostingCreate(JobPostingBase):
     pass
