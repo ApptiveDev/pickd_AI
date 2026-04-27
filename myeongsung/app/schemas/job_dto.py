@@ -33,6 +33,9 @@ class Citation(BaseModel):
     source_url: Optional[str] = Field(None, description="원본 위치로 이동하는 하이퍼링크 (웹일 경우 Text Fragment 포함)")
     bbox: Optional[List[float]] = Field(None, description="선택 영역 좌표 [x1, y1, x2, y2]")
     element_id: Optional[int] = Field(None, description="내부 매핑용 요소 ID")
+    page_width: Optional[float] = Field(None, description="원본 페이지 너비")
+    page_height: Optional[float] = Field(None, description="원본 페이지 높이")
+
 
 
 
