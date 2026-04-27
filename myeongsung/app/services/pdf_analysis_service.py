@@ -69,6 +69,13 @@ def analyze_job_pdf(file_content: bytes) -> JobPostingCreate:
             {"content": full_content},
             config={"run_name": "pipe-analy"}
         )
+        
+        # 5. 출처(Citations)에 페이지 이동 링크(#page=N) 추가
+        if structured_result.citations:
+            for citation in structured_result.citations:
+                if citation.page > 0:
+                    citation.source_url = f"#page={citation.page}"
+        
         return structured_result
     except Exception as e:
         raise ValueError(f"LLM 데이터 추출 중 오류가 발생했습니다: {str(e)}")
