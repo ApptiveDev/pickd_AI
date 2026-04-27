@@ -9,6 +9,7 @@ from app.services.resume_service import create_workflow
 
 from app.schemas.job_dto import UrlAnalysisRequest, JobPostingCreate
 from app.services.job_analysis_service import analyze_job_url
+from app.services.pdf_analysis_service import analyze_job_pdf
 
 router = APIRouter()
 
@@ -22,6 +23,19 @@ async def analyze_url(request: UrlAnalysisRequest):
     """
     try:
         result = analyze_job_url(request.url)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/analyze/pdf", response_model=JobPostingCreate)
+async def analyze_pdf(file: UploadFile = File(...)):
+    """
+    PDF 파일을 업로드받아 Azure Document Intelligence로 분석하고,
+    LLM을 통해 11개 필드로 구성된 구조화된 데이터를 반환합니다.
+    """
+    try:
+        file_content = await file.read()
+        result = analyze_job_pdf(file_content)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
