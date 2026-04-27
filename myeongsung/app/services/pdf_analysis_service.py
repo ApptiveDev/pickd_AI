@@ -64,10 +64,10 @@ def analyze_job_pdf(file_content: bytes) -> JobPostingCreate:
     chain = prompt | llm.with_structured_output(JobPostingCreate)
     
     try:
-        # LangSmith에 'pdf_parsing_with_citations'라는 이름으로 추적되도록 config 추가
+        # LangSmith에 'pipe-analy'이라는 이름으로 추적되도록 config 추가
         structured_result = chain.invoke(
             {"content": full_content},
-            config={"run_name": "pdf_parsing_with_citations"}
+            config={"run_name": "pipe-analy"}
         )
         return structured_result
     except Exception as e:
