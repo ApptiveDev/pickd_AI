@@ -108,14 +108,22 @@ def analyze_job_pdf(file_content: bytes) -> JobPostingCreate:
                             ys = [v for i, v in enumerate(raw_coords) if i % 2 != 0]
                         
                         if xs and ys:
-                            # [x1, y1, x2, y2] 형태로 정규화하여 반환
-                            citation.bbox = [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
-                            
-                            # 페이지 원본 크기 정보 추가 (BBox 보정용)
+                            # 페이지 원본 크기 정보 가져오기
                             dim = page_dimensions.get(citation.page)
-                            if dim:
+                            if dim and dim["width"] > 0 and dim["height"] > 0:
+                                # [x1, y1, x2, y2]를 0~1 사이의 비율로 정규화하여 반환
+                                citation.bbox = [
+                                    float(min(xs)) / dim["width"],
+                                    float(min(ys)) / dim["height"],
+                                    float(max(xs)) / dim["width"],
+                                    float(max(ys)) / dim["height"]
+                                ]
                                 citation.page_width = dim["width"]
                                 citation.page_height = dim["height"]
+                            else:
+                                # 크기 정보가 없으면 절대 좌표 유지
+                                citation.bbox = [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
+
 
                 
                 # 페이지 이동 링크
