@@ -16,22 +16,60 @@ analysis_mode = st.sidebar.selectbox("분석 모드 선택", ["PDF 분석", "URL
 api_base_url = st.sidebar.text_input("API 서버 주소", "http://127.0.0.1:8001/api/v1")
 
 # --- 유틸리티 함수 ---
-def draw_bbox(image, bbox, label=None):
-    """이미지 위에 bbox를 그립니다."""
+def draw_bbox(image, bbox, citation, label=None):
+    """이미지 위에 bbox를 그리며, 정규화된 좌표(0-1)와 픽셀 좌표를 모두 대응합니다."""
+    img_w, img_h = image.size
+    
+    # 1. 정규화 여부 확인 (모든 값이 1.1 이하이면 0~1 사이의 비율로 간주)
+    is_normalized = all(v <= 1.1 for v in bbox)
+    
+    if is_normalized:
+        # 0~1 사이의 비율인 경우 -> 이미지 크기를 직접 곱함
+        scaled_bbox = [
+            bbox[0] * img_w,
+            bbox[1] * img_h,
+            bbox[2] * img_w,
+            bbox[3] * img_h
+        ]
+    else:
+        # 절대 좌표(Point/Pixel)인 경우 -> 기존 스케일 보정 로직 사용
+        orig_w = citation.get("page_width") or img_w
+        orig_h = citation.get("page_height") or img_h
+        scale_x = img_w / orig_w
+        scale_y = img_h / orig_h
+        scaled_bbox = [
+            bbox[0] * scale_x,
+            bbox[1] * scale_y,
+            bbox[2] * scale_x,
+            bbox[3] * scale_y
+        ]
+    
+    # 디버깅용 로그
+    st.write(f"🔍 **Debug BBox**: {'Normalized' if is_normalized else 'Absolute'} {bbox} -> Scaled {scaled_bbox}")
+    
     draw = ImageDraw.Draw(image)
-    # bbox format: [x1, y1, x2, y2]
-    draw.rectangle(bbox, outline="red", width=3)
+    draw.rectangle(scaled_bbox, outline="#FF69B4", width=5)
     if label:
-        draw.text((bbox[0], bbox[1]-10), label, fill="red")
+        draw.text((scaled_bbox[0], scaled_bbox[1]-15), label, fill="#FF69B4")
     return image
 
+
+
+
 def render_pdf_page(pdf_bytes, page_num):
-    """PDF 특정 페이지를 이미지로 렌더링합니다."""
+    """PDF 특정 페이지를 이미지로 렌더링하고 원본 크기 정보를 함께 반환합니다."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page = doc.load_page(page_num - 1)  # 0-indexed
+    page = doc.load_page(page_num - 1)
+    
+    # 원본 페이지 크기 (Point 단위)
+    pdf_size = (page.rect.width, page.rect.height)
+    
+    # 렌더링 (DPI를 높여서 더 선명하게 볼 수도 있음, 여기서는 1.0배율)
     pix = page.get_pixmap()
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    return img
+    
+    return img, pdf_size
+
 
 # --- 메인 로직 ---
 if analysis_mode == "PDF 분석":
@@ -122,10 +160,16 @@ if "analysis_result" in st.session_state:
             
             # PDF 시각화
             if analysis_mode == "PDF 분석" and "pdf_bytes" in st.session_state:
-                page_img = render_pdf_page(st.session_state["pdf_bytes"], cit["page"])
+                page_img, pdf_size = render_pdf_page(st.session_state["pdf_bytes"], cit["page"])
                 if cit.get("bbox"):
-                    page_img = draw_bbox(page_img, cit["bbox"], cit["field"])
-                st.image(page_img, caption=f"Page {cit['page']} 분석 결과", use_container_width=True)
+                    page_img = draw_bbox(page_img, cit["bbox"], cit, cit["field"])
+                    st.image(page_img, caption=f"Page {cit['page']} 분석 결과", width="stretch")
+                else:
+                    st.warning("⚠️ 이 출처에 대한 좌표 정보(bbox)가 결과에 포함되지 않았습니다.")
+                    st.image(page_img, caption=f"Page {cit['page']} (좌표 없음)", width="stretch")
+
+
+
             
             # 이미지 시각화
             elif analysis_mode == "이미지 분석" and "image_bytes_list" in st.session_state:
@@ -134,8 +178,9 @@ if "analysis_result" in st.session_state:
                     img = Image.open(io.BytesIO(st.session_state["image_bytes_list"][img_idx]))
                     if cit.get("bbox"):
                         # Gemini bbox는 보통 정규화되어 있을 수 있으므로 처리 필요 (현재는 Upstage 스타일 좌표 가정)
-                        img = draw_bbox(img, cit["bbox"], cit["field"])
-                    st.image(img, caption=f"이미지 {cit['page']} 분석 결과", use_container_width=True)
+                        img = draw_bbox(img, cit["bbox"], cit, cit["field"])
+                    st.image(img, caption=f"이미지 {cit['page']} 분석 결과", width="stretch")
+
             
             # URL은 링크로 대체
             else:

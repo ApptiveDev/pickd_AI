@@ -32,8 +32,14 @@ def analyze_job_pdf(file_content: bytes) -> JobPostingCreate:
     extracted_content = []
     element_map = {} # ID로 요소 정보를 찾기 위한 맵
     
+    # Upstage 응답에서 페이지별 원본 크기 추출
+    page_dimensions = {}
+    for pg in result.get("pages", []):
+        page_dimensions[pg.get("page")] = {"width": pg.get("width"), "height": pg.get("height")}
+
     for idx, element in enumerate(result.get("elements", [])):
         page_num = element.get("page")
+
         category = element.get("category")
         content = element.get("content", {}).get("text", "")
         
@@ -61,9 +67,15 @@ def analyze_job_pdf(file_content: bytes) -> JobPostingCreate:
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "당신은 채용 공고 분석 전문가입니다. 주어진 PDF 파싱 내용(ID 및 페이지 번호 포함)을 면밀히 분석하여 정보를 추출하세요. 특히 'citations' 필드에는 해당 정보의 근거가 된 'element_id'와 'page', 'content'를 정확히 입력하여 NotebookLM과 같은 출처 기능을 제공해야 합니다."),
+        ("system", (
+            "당신은 채용 공고 분석 전문가입니다. 주어진 PDF 파싱 내용(ID 및 페이지 번호 포함)을 면밀히 분석하여 정보를 추출하세요.\n"
+            "규칙 1: 'citations' 필드에는 해당 정보의 근거가 된 'element_id', 'page', 'content'를 정확히 입력하세요.\n"
+            "규칙 2: **중요** 'citations'에 포함된 정보는 반드시 대응하는 메인 필드(예: company_name, qualifications 등)에도 동일하게 값이 채워져야 합니다.\n"
+            "규칙 3: 해당하는 정보가 명확하지 않다면 null을 사용하되, 출처가 있는 정보는 절대로 null이 되어서는 안 됩니다."
+        )),
         ("user", "다음 PDF 분석 내용을 바탕으로 채용 정보와 출처(Citations)를 추출해주세요:\n\n{content}")
     ])
+
     
     chain = prompt | llm.with_structured_output(JobPostingCreate)
     
@@ -96,8 +108,23 @@ def analyze_job_pdf(file_content: bytes) -> JobPostingCreate:
                             ys = [v for i, v in enumerate(raw_coords) if i % 2 != 0]
                         
                         if xs and ys:
-                            # [x1, y1, x2, y2] 형태로 정규화하여 반환
-                            citation.bbox = [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
+                            # 페이지 원본 크기 정보 가져오기
+                            dim = page_dimensions.get(citation.page)
+                            if dim and dim["width"] > 0 and dim["height"] > 0:
+                                # [x1, y1, x2, y2]를 0~1 사이의 비율로 정규화하여 반환
+                                citation.bbox = [
+                                    float(min(xs)) / dim["width"],
+                                    float(min(ys)) / dim["height"],
+                                    float(max(xs)) / dim["width"],
+                                    float(max(ys)) / dim["height"]
+                                ]
+                                citation.page_width = dim["width"]
+                                citation.page_height = dim["height"]
+                            else:
+                                # 크기 정보가 없으면 절대 좌표 유지
+                                citation.bbox = [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
+
+
                 
                 # 페이지 이동 링크
                 if citation.page > 0:
