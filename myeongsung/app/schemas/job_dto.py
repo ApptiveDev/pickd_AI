@@ -31,6 +31,9 @@ class Citation(BaseModel):
     page: int = Field(..., description="근거가 발견된 PDF 페이지 번호 (URL일 경우 0)")
     content: str = Field(..., description="근거가 된 원문 텍스트 일부")
     source_url: Optional[str] = Field(None, description="원본 위치로 이동하는 하이퍼링크 (웹일 경우 Text Fragment 포함)")
+    bbox: Optional[List[float]] = Field(None, description="선택 영역 좌표 [x1, y1, x2, y2]")
+    element_id: Optional[int] = Field(None, description="내부 매핑용 요소 ID")
+
 
 
 # ── 공고 분석 데이터 DTO (11개 필드 + 출처) ──────────────────
