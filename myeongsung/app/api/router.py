@@ -10,8 +10,10 @@ from app.services.resume_service import create_workflow
 from app.schemas.job_dto import UrlAnalysisRequest, JobPostingCreate
 from app.services.job_analysis_service import analyze_job_url
 from app.services.pdf_analysis_service import analyze_job_pdf
+from app.services.image_analysis_service import analyze_job_image
 
 router = APIRouter()
+
 
 workflow = create_workflow()
 
@@ -40,7 +42,28 @@ async def analyze_pdf(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+from typing import Optional, List
+
+@router.post("/analyze/image", response_model=JobPostingCreate)
+async def analyze_image(files: List[UploadFile] = File(...)):
+    """
+    여러 장의 이미지 파일(PNG, JPG 등)을 업로드받아 Gemini 1.5 Flash로 통합 분석하고,
+    구조화된 데이터를 반환합니다.
+    """
+    try:
+        image_contents = []
+        for file in files:
+            content = await file.read()
+            image_contents.append(content)
+            
+        result = analyze_job_image(image_contents)
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/analyze-and-place", response_model=PlacementResponse)
+
 async def analyze_and_place(
     background_tasks: BackgroundTasks,
     jd_pdf: Optional[UploadFile] = File(None, description="채용공고 원문 PDF 파일 (업스테이지 파싱용)"),
