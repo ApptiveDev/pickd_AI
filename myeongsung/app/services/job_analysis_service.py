@@ -54,11 +54,22 @@ def analyze_job_url(url: str) -> JobPostingCreate:
     chain = prompt | llm.with_structured_output(JobPostingCreate)
     
     try:
-        # LangSmith에 'pipe-analy'와 일관성을 위해 이름을 맞춰줄 수 있으나 기존 'firecrawl' 유지 또는 변경 가능
+        # LangSmith에 'firecrawl'이라는 이름으로 추적되도록 config 추가
         result = chain.invoke(
             {"markdown": markdown_content},
             config={"run_name": "firecrawl"}
         )
+        
+        # 3. 출처(Citations)에 웹 하이라이트 링크(Text Fragment) 추가
+        from urllib.parse import quote
+        
+        if result.citations:
+            for citation in result.citations:
+                # 브라우저의 'Scroll to Text Fragment' 기능 활용 (#:~:text=문구)
+                # 문구가 너무 길면 인코딩 문제가 생길 수 있으므로 적절히 처리
+                safe_text = quote(citation.content.replace("\n", " ").strip())
+                citation.source_url = f"{url}#:~:text={safe_text}"
+                
         return result
 
     except Exception as e:

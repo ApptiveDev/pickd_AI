@@ -28,8 +28,10 @@ class UserResponse(UserBase):
 
 class Citation(BaseModel):
     field: str = Field(..., description="근거가 되는 필드명")
-    page: int = Field(..., description="근거가 발견된 PDF 페이지 번호")
+    page: int = Field(..., description="근거가 발견된 PDF 페이지 번호 (URL일 경우 0)")
     content: str = Field(..., description="근거가 된 원문 텍스트 일부")
+    source_url: Optional[str] = Field(None, description="원본 위치로 이동하는 하이퍼링크 (웹일 경우 Text Fragment 포함)")
+
 
 # ── 공고 분석 데이터 DTO (11개 필드 + 출처) ──────────────────
 class JobPostingBase(BaseModel):
